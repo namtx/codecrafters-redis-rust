@@ -3,9 +3,14 @@ use std::net::TcpStream;
 use memchr::memchr;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Instant, Duration};
 
+pub struct RedisValue {
+  pub value: String,
+  pub expire_time: Option<Instant>,
+}
 pub struct Redis {
-  pub data: Mutex<HashMap<String, String>>,
+  pub data: Mutex<HashMap<String, RedisValue>>,
 }
 
 impl Redis {
@@ -39,9 +44,48 @@ impl Redis {
                       match &items[2] {
                         RedisResp::BulkString(split) => {
                           let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
-                          let mut data = self.data.lock().unwrap();
-                          data.insert(key, value);
-                          stream.write(format!("+OK\r\n").as_bytes()).unwrap();
+                          if items.len() > 3 {
+                            match &items[3] {
+                              RedisResp::BulkString(split) => {
+                                let expire_type = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                                match expire_type.as_str() {
+                                  "PX" => {
+                                    match &items[4] {
+                                      RedisResp::BulkString(split) => {
+                                        let duration = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                                        let expire_time = duration.parse::<u64>().unwrap();
+                                        let mut data = self.data.lock().unwrap();
+                                        data.insert(key, RedisValue{value: value, expire_time: Some(Instant::now() + Duration::from_millis(expire_time))});
+                                        stream.write(format!("+OK\r\n").as_bytes()).unwrap();
+                                      }
+                                      _ => panic!("Expected PX value"),
+                                    }
+                                  }
+                                  "EX" => {
+                                    match &items[4] {
+                                      RedisResp::BulkString(split) => {
+                                        let duration = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                                        let expire_time = duration.parse::<u64>().unwrap();
+                                        let mut data = self.data.lock().unwrap();
+                                        data.insert(key, RedisValue{value: value, expire_time: Some(Instant::now() + Duration::from_secs(expire_time))});
+                                        stream.write(format!("+OK\r\n").as_bytes()).unwrap();
+                                      }
+                                      _ => panic!("Expected EX value"),
+                                    }
+                                  }
+                                  _ => {
+                                    stream.write(b"-ERR Unknown command\r\n").unwrap();
+                                  }
+                                }
+                              }
+                              _ => panic!("Expected BulkString"),
+                            }
+                          } else {
+                            println!("SET {} {}", key, value);
+                            let mut data = self.data.lock().unwrap();
+                            data.insert(key, RedisValue{value: value, expire_time: None});
+                            stream.write(format!("+OK\r\n").as_bytes()).unwrap();
+                          }
                         }
                         _ => panic!("Expected BulkString"),
                       }
@@ -53,9 +97,20 @@ impl Redis {
                   match &items[1] {
                     RedisResp::BulkString(split) => {
                       let key = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
-                      let data = self.data.lock().unwrap();
+                      println!("GET {}", key);
+                      let mut data = self.data.lock().unwrap();
                       if let Some(value) = data.get(&key) {
-                        stream.write(format!("${}\r\n{}\r\n", value.len(), value).as_bytes()).unwrap();
+                        if let Some(expire_time) = value.expire_time {
+                          if Instant::now() > expire_time {
+                            data.remove(&key);
+                            stream.write(format!("$-1\r\n").as_bytes()).unwrap();
+                          } else {
+                            stream.write(format!("${}\r\n{}\r\n", value.value.len(), value.value).as_bytes()).unwrap();
+                          }
+                        } else {
+                          // No expiration time, just return the value
+                          stream.write(format!("${}\r\n{}\r\n", value.value.len(), value.value).as_bytes()).unwrap();
+                        }
                       } else {
                         stream.write(format!("$-1\r\n").as_bytes()).unwrap();
                       }
