@@ -2,6 +2,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
+mod redis;
 
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -12,11 +13,8 @@ fn main() {
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
         thread::spawn(move || {
-            loop {
-                let mut buffer = [0; 1024];
-                stream.read(&mut buffer).unwrap();
-                stream.write(b"+PONG\r\n").unwrap();
-            }
+            let redis = redis::Redis{};
+            redis.handle_request(&mut stream)
         });
     }
 }

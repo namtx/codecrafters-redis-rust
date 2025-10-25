@@ -1,0 +1,179 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use memchr::memchr;
+
+pub struct Redis {}
+
+impl Redis {
+  pub fn handle_request(&self, stream: &mut TcpStream) {
+    loop {
+      let mut buffer = [0; 1024];
+      stream.read(&mut buffer).unwrap();
+      let resp = RedisRespResult::from_bytes(&buffer[..], 0);
+      match resp {
+        RedisRespResult(Some(RedisResp::Arrays(items)), _) => {
+          match &items[0] {
+            RedisResp::BulkString(split) => {
+              let string = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+              match string.as_str() {
+                "ECHO" => {
+                  match &items[1] {
+                    RedisResp::BulkString(split) => {
+                      let string = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                      stream.write(format!("${}\r\n{}\r\n", split.1 - split.0, string).as_bytes()).unwrap();
+                    }
+                    _ => panic!("Expected BulkString"),
+                  }
+                }
+                "PING" => {
+                  stream.write(b"+PONG\r\n").unwrap();
+                }
+                _ => {
+                  stream.write(b"-ERR Unknown command\r\n").unwrap();
+                }
+              }
+            }
+            _ => panic!("Expected BulkString"),
+          }
+        }
+        _ => {
+          stream.write(b"-ERR Unknown command\r\n").unwrap();
+        }
+      }
+    }
+  }
+}
+
+
+// start index, end index
+#[derive(Debug)]
+struct RespSplit(usize, usize);
+
+// parsed result, next start index
+#[derive(Debug)]
+struct RedisRespResult(Option<RedisResp>, usize);
+
+#[derive(Debug)]
+pub enum RedisResp {
+    SimpleString(RespSplit),
+    Integer(RespSplit),
+    Error(RespSplit),
+    BulkString(RespSplit),
+    Arrays(Vec<RedisResp>),
+    Unknown(String),
+}
+
+impl RedisRespResult {
+    fn from_bytes(value: &[u8], start: usize) -> Self {
+      match value[start] {
+        // SimpleString: +<string>\r\n
+        b'+' => {
+          let end = start + memchr(b'\r', &value[start..]).unwrap();
+          RedisRespResult(Some(RedisResp::SimpleString(RespSplit(start+1, end))), end+2)
+        }
+        // Integer: :[<+|->]<value>\r\n
+        b':' => {
+          let start = 2;
+          let end = value.iter().position(|&b| b == b'\r').unwrap();
+          RedisRespResult(Some(RedisResp::Integer(RespSplit(start, end))), end+2)
+        }
+        // BulkString: $<length>\r\n<string>\r\n
+        b'$' => {
+          // first \r\n
+          let first_cr = memchr(b'\r', &value[start..]).unwrap();
+          let len = str::from_utf8(&value[start+1..start+first_cr]).unwrap().parse::<usize>().unwrap();
+          let end = start + first_cr + 2 + len;
+          RedisRespResult(Some(RedisResp::BulkString(RespSplit(start + first_cr + 2, end))), end+2)
+        }
+        // Arrays: *<length>\r\n<array>\r\n
+        b'*' => {
+          let first_cr = memchr(b'\r', &value[start..]).unwrap();
+          let length = str::from_utf8(&value[start + 1..first_cr]).unwrap().parse::<usize>().unwrap();
+          let mut items = Vec::new();
+          let mut next = start + first_cr + 2;
+          for _ in 0..length {
+            let item = RedisRespResult::from_bytes(value, next);
+            match item {
+              RedisRespResult(Some(resp), new_next) => {
+                items.push(resp);
+                next = new_next;
+              }
+              _ => panic!("Expected Some(RedisResp)"),
+            }
+          }
+          RedisRespResult(Some(RedisResp::Arrays(items)), next)
+        }
+        _ => {
+          RedisRespResult(None, 0)
+        }
+      }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_redis_resp() {
+    let resp: RedisRespResult = RedisRespResult::from_bytes(&b"+PONG\r\n"[..], 0);
+    match resp {
+      RedisRespResult(Some(RedisResp::SimpleString(split)), _) => {
+        assert_eq!(String::from_utf8(b"+PONG\r\n"[split.0..split.1].to_vec()).unwrap(), "PONG");
+      }
+      RedisRespResult(None, _) => panic!("Expected Some(RedisRespResult)"),
+      _ => panic!("Expected SimpleString"),
+    }
+  }
+
+  #[test]
+  fn test_redis_resp_integer() {
+    let bytes = b":+123\r\n";
+    let resp: RedisRespResult = RedisRespResult::from_bytes(&bytes[..], 0);
+    match resp {
+      RedisRespResult(Some(RedisResp::Integer(split)), _) => {
+        assert_eq!(str::from_utf8(&bytes[split.0..split.1]).unwrap().parse::<usize>().unwrap(), 123);
+      }
+      RedisRespResult(None, _) => panic!("Expected Some(RedisRespResult)"),
+      _ => panic!("Expected Integer"),
+    }
+  }
+
+  #[test]
+  fn test_redis_resp_bulk_string() {
+    let bytes = b"$4\r\nping\r\n";
+    let resp: RedisRespResult = RedisRespResult::from_bytes(&bytes[..], 0);
+    match resp {
+      RedisRespResult(Some(RedisResp::BulkString(split)), _) => {
+        assert_eq!(String::from_utf8(bytes[split.0..split.1].to_vec()).unwrap(), "ping");
+      }
+      RedisRespResult(None, _) => panic!("Expected Some(RedisRespResult)"),
+      _ => panic!("Expected BulkString"),
+    }
+  }
+
+  #[test]
+  fn test_redis_resp_arrays() {
+    let bytes = b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n";
+    let resp: RedisRespResult = RedisRespResult::from_bytes(&bytes[..], 0);
+    match resp {
+      RedisRespResult(Some(RedisResp::Arrays(items)), _) => {
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+          RedisResp::BulkString(split) => {
+            assert_eq!(String::from_utf8(bytes[split.0..split.1].to_vec()).unwrap(), "ECHO")
+          }
+          _ => panic!("Expected BulkString"),
+        }
+        match &items[1] {
+          RedisResp::BulkString(split) => {
+            assert_eq!(String::from_utf8(bytes[split.0..split.1].to_vec()).unwrap(), "hey")
+          }
+          _ => panic!("Expected BulkString"),
+        }
+      }
+      RedisRespResult(None, _) => panic!("Expected Some(RedisRespResult)"),
+      _ => panic!("Expected Arrays"),
+    }
+  }
+}
