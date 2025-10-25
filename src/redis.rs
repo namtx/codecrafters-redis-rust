@@ -1,8 +1,12 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use memchr::memchr;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
-pub struct Redis {}
+pub struct Redis {
+  pub data: Mutex<HashMap<String, String>>,
+}
 
 impl Redis {
   pub fn handle_request(&self, stream: &mut TcpStream) {
@@ -27,6 +31,37 @@ impl Redis {
                 }
                 "PING" => {
                   stream.write(b"+PONG\r\n").unwrap();
+                }
+                "SET" => {
+                  match &items[1] {
+                    RedisResp::BulkString(split) => {
+                      let key = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                      match &items[2] {
+                        RedisResp::BulkString(split) => {
+                          let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                          let mut data = self.data.lock().unwrap();
+                          data.insert(key, value);
+                          stream.write(format!("+OK\r\n").as_bytes()).unwrap();
+                        }
+                        _ => panic!("Expected BulkString"),
+                      }
+                    }
+                    _ => panic!("Expected BulkString"),
+                  }
+                }
+                "GET" => {
+                  match &items[1] {
+                    RedisResp::BulkString(split) => {
+                      let key = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                      let data = self.data.lock().unwrap();
+                      if let Some(value) = data.get(&key) {
+                        stream.write(format!("${}\r\n{}\r\n", value.len(), value).as_bytes()).unwrap();
+                      } else {
+                        stream.write(format!("$-1\r\n").as_bytes()).unwrap();
+                      }
+                    }
+                    _ => panic!("Expected BulkString"),
+                  }
                 }
                 _ => {
                   stream.write(b"-ERR Unknown command\r\n").unwrap();
