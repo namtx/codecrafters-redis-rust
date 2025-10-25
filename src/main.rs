@@ -11,9 +11,11 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut buffer = [0; 1024];
-                stream.read(&mut buffer).unwrap();
-                stream.write(b"+PONG\r\n").unwrap();
+                loop {
+                    let mut buffer = [0; 1024];
+                    stream.read(&mut buffer).unwrap();
+                    stream.write(b"+PONG\r\n").unwrap();
+                }
             }
             Err(e) => {
                 println!("error: {}", e);
