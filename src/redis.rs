@@ -120,22 +120,41 @@ impl Redis {
                   }
                 }
                 "RPUSH" => {
+                  if items.len() < 3 {
+                    stream.write(b"-Wrong number of arguments for 'RPUSH' command\r\n").unwrap();
+                    continue;
+                  }
                   match &items[1] {
                     RedisResp::BulkString(split) => {
                       let key = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
                       match &items[2] {
-                        RedisResp::BulkString(split) => {
-                          let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                        RedisResp::BulkString(_) => {
                           let mut list = self.list.lock().unwrap();
-                          match list.get_mut(&key) {
-                            Some(existing_list) => {
-                              existing_list.insert(0, value);
-                              stream.write(format!(":{}\r\n", existing_list.len()).as_bytes()).unwrap();
+                          if let Some(existing_list) = list.get_mut(&key) {
+                            for item in items[2..].iter() {
+                              match item {
+                                RedisResp::BulkString(split) => {
+                                  let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                                  existing_list.push(value);
+                                }
+                                _ => panic!("Expected BulkString"),
+                              }
                             }
-                            None => {
-                              list.insert(key, vec![value]);
-                              stream.write(format!(":{}\r\n", 1).as_bytes()).unwrap();
+                            stream.write(format!(":{}\r\n", existing_list.len()).as_bytes()).unwrap();
+                          } else {
+                            let mut new_list = vec![];
+                            for item in items[2..].iter() {
+                              match item {
+                                RedisResp::BulkString(split) => {
+                                  let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                                  new_list.push(value);
+                                }
+                                _ => panic!("Expected BulkString"),
+                              }
                             }
+                            let len = new_list.len();
+                            list.insert(key, new_list);
+                            stream.write(format!(":{}\r\n", len).as_bytes()).unwrap();
                           }
                         }
                         _ => panic!("Expected BulkString"),
