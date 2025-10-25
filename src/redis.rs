@@ -11,6 +11,7 @@ pub struct RedisValue {
 }
 pub struct Redis {
   pub data: Mutex<HashMap<String, RedisValue>>,
+  pub list: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl Redis {
@@ -113,6 +114,31 @@ impl Redis {
                         }
                       } else {
                         stream.write(format!("$-1\r\n").as_bytes()).unwrap();
+                      }
+                    }
+                    _ => panic!("Expected BulkString"),
+                  }
+                }
+                "RPUSH" => {
+                  match &items[1] {
+                    RedisResp::BulkString(split) => {
+                      let key = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                      match &items[2] {
+                        RedisResp::BulkString(split) => {
+                          let value = String::from_utf8(buffer[split.0..split.1].to_vec()).unwrap();
+                          let mut list = self.list.lock().unwrap();
+                          match list.get_mut(&key) {
+                            Some(existing_list) => {
+                              existing_list.insert(0, value);
+                              stream.write(format!(":{}\r\n", existing_list.len()).as_bytes()).unwrap();
+                            }
+                            None => {
+                              list.insert(key, vec![value]);
+                              stream.write(format!(":{}\r\n", 1).as_bytes()).unwrap();
+                            }
+                          }
+                        }
+                        _ => panic!("Expected BulkString"),
                       }
                     }
                     _ => panic!("Expected BulkString"),
